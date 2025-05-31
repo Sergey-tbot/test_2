@@ -23,12 +23,20 @@ class WorkerSignals(QObject):
 
 def parse_farming_simulator_mod(url):
     try:
-        response = requests.get(url)
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                          "AppleWebKit/537.36 (KHTML, like Gecko) "
+                          "Chrome/58.0.3029.110 Safari/537.3"
+        }
+        response = requests.get(url, headers=headers)
         response.raise_for_status()
         soup = BeautifulSoup(response.text, "html.parser")
 
         # Название
         title_tag = soup.find("div", class_="modtitle")
+        if not title_tag:
+            # Альтернативный способ: ищем h1 или title
+            title_tag = soup.find("h1")
         name = title_tag.text.strip() if title_tag else "N/A"
 
         # Версия и дата
@@ -60,6 +68,7 @@ def parse_farming_simulator_mod(url):
             "asset_name": zip_url.split("/")[-1] if zip_url else None
         }
     except Exception as e:
+        print("Ошибка парсинга farming-simulator:", e)
         return {
             "name": "Ошибка парсинга",
             "version": "N/A",
@@ -208,6 +217,30 @@ class GitHubTrackerApp(QWidget):
         bottom_layout.addWidget(self.status_label)
 
         main_layout.addLayout(bottom_layout)
+        self.table.itemChanged.connect(self.on_item_changed)
+
+    def on_item_changed(self, item):
+        # Проверяем, что редактируется первый столбец
+        if item.column() == 0:
+            new_name = item.text()
+            row = item.row()
+            # Получаем URL репозитория из текущей строки (например, по индексу)
+            # Для этого нужно хранить соответствие row -> url
+            url = self.get_url_by_row(row)
+            if url:
+                # Обновляем поле name в last_release
+                if "last_release" in self.tracked_repos[url]:
+                    self.tracked_repos[url]["last_release"]["name"] = new_name
+                    self.save_data()
+                    self.status_label.setText(f"Название репозитория обновлено: {new_name}")
+
+    def get_url_by_row(self, row):
+        # Поскольку порядок строк в таблице совпадает с порядком в self.tracked_repos (без _column_widths),
+        # можно получить URL так:
+        keys = [k for k in self.tracked_repos.keys() if k != "_column_widths"]
+        if 0 <= row < len(keys):
+            return keys[row]
+        return None
 
     def on_selection_changed(self):
         selected = self.table.selectionModel().hasSelection()
@@ -248,15 +281,19 @@ class GitHubTrackerApp(QWidget):
         for row in selected_rows:
             repo_name = self.table.item(row, 0).text()
             for url in self.tracked_repos:
-                owner, repo = self.get_owner_repo(url)
-                # Для farming-simulator.com repo - это название мода, для github - имя репозитория
-                if "farming-simulator.com" in url:
-                    name = self.tracked_repos[url].get("last_release", {}).get("name", "")
-                    if name == repo_name:
+                if url == "_column_widths":
+                    continue
+                if "github.com" in url:
+                    try:
+                        owner, repo = self.get_owner_repo(url)
+                    except IndexError:
+                        continue  # Пропускаем некорректные ссылки
+                    if repo == repo_name:
                         urls_to_delete.append(url)
                         break
-                else:
-                    if repo == repo_name:
+                elif "farming-simulator.com" in url:
+                    name = self.tracked_repos[url].get("last_release", {}).get("name", "")
+                    if name == repo_name:
                         urls_to_delete.append(url)
                         break
 
@@ -383,6 +420,8 @@ class GitHubTrackerApp(QWidget):
             row = self.table.rowCount()
             self.table.insertRow(row)
 
+
+
             # Имя репозитория или мода
             name = release.get("name", "N/A")
             self.table.setItem(row, 0, QTableWidgetItem(name))
@@ -407,6 +446,10 @@ class GitHubTrackerApp(QWidget):
             btn_download = QPushButton("Скачать")
             btn_download.clicked.connect(lambda checked, u=url: self.download_release(u))
             self.table.setCellWidget(row, 6, btn_download)
+
+            item = QTableWidgetItem(name)
+            item.setFlags(item.flags() | Qt.ItemIsEditable)  # Разрешаем редактирование
+            self.table.setItem(row, 0, item)
 
             if release.get("is_new", False):
                 btn_download.setStyleSheet("background-color: yellow")
