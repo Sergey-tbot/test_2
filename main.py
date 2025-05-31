@@ -6,9 +6,6 @@ import threading
 import time
 from datetime import datetime, timezone
 from urllib.parse import urlparse, parse_qs
-import requests
-from bs4 import BeautifulSoup
-import re
 
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton,
@@ -17,9 +14,83 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, Signal, QObject
 from PySide6.QtGui import QFont
 
+from bs4 import BeautifulSoup  # pip install beautifulsoup4
+
 
 class WorkerSignals(QObject):
     progress = Signal(str)  # текст статуса
+
+
+def parse_farming_simulator_mod(url):
+    try:
+        response = requests.get(url)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, "html.parser")
+
+        # Название
+        title_tag = soup.find("div", class_="modtitle")
+        name = title_tag.text.strip() if title_tag else "N/A"
+
+        # Версия и дата
+        version = "N/A"
+        released = "N/A"
+        for info in soup.find_all("div", class_="modinfo"):
+            text = info.get_text(separator="\n")
+            for line in text.splitlines():
+                if "Version" in line:
+                    version = line.split("Version")[-1].strip()
+                if "Released" in line:
+                    released = line.split("Released")[-1].strip()
+
+        # Прямая ссылка на архив
+        zip_url = None
+        for link in soup.find_all("a", href=True):
+            href = link["href"]
+            if href.lower().endswith(".zip"):
+                zip_url = href
+                break
+        if zip_url and zip_url.startswith("/"):
+            zip_url = "https://www.farming-simulator.com" + zip_url
+
+        return {
+            "name": name,
+            "version": version,
+            "date": released,
+            "asset_url": zip_url,
+            "asset_name": zip_url.split("/")[-1] if zip_url else None
+        }
+    except Exception as e:
+        return {
+            "name": "Ошибка парсинга",
+            "version": "N/A",
+            "date": "N/A",
+            "asset_url": None,
+            "asset_name": None
+        }
+
+
+def validate_repo_url(url: str) -> bool:
+    try:
+        parsed = urlparse(url)
+        netloc = parsed.netloc.lower()
+        path_parts = parsed.path.strip("/").split("/")
+
+        if netloc == "github.com":
+            if len(path_parts) >= 2 and all(path_parts[:2]):
+                return True
+            return False
+
+        elif netloc in ("www.farming-simulator.com", "farming-simulator.com"):
+            if parsed.path == "/mod.php":
+                params = parse_qs(parsed.query)
+                if "mod_id" in params:
+                    return True
+            return False
+
+        else:
+            return False
+    except Exception:
+        return False
 
 
 def download_file(url, save_path, signals):
@@ -60,74 +131,10 @@ def download_file(url, save_path, signals):
             os.remove(save_path)
 
 
-def parse_farming_simulator_mod(url):
-    response = requests.get(url)
-    response.raise_for_status()
-    soup = BeautifulSoup(response.text, "html.parser")
-
-    # Название
-    title_tag = soup.find("div", class_="modtitle")
-    name = title_tag.text.strip() if title_tag else "N/A"
-
-    # Версия и дата
-    version = "N/A"
-    released = "N/A"
-    for info in soup.find_all("div", class_="modinfo"):
-        text = info.get_text(separator="\n")
-        match_ver = re.search(r"Version\s*([\d\.]+)", text)
-        match_rel = re.search(r"Released\s*([\d\.]+)", text)
-        if match_ver:
-            version = match_ver.group(1)
-        if match_rel:
-            released = match_rel.group(1)
-    # Прямая ссылка на архив
-    zip_url = None
-    for link in soup.find_all("a", href=True):
-        href = link["href"]
-        if href.lower().endswith(".zip"):
-            zip_url = href
-            break
-    # Иногда ссылка относительная
-    if zip_url and zip_url.startswith("/"):
-        zip_url = "https://www.farming-simulator.com" + zip_url
-
-    return {
-        "name": name,
-        "version": version,
-        "date": released,
-        "asset_url": zip_url,
-        "asset_name": zip_url.split("/")[-1] if zip_url else None
-    }
-
-
-def validate_repo_url(url: str) -> bool:
-    try:
-        parsed = urlparse(url)
-        netloc = parsed.netloc.lower()
-        path_parts = parsed.path.strip("/").split("/")
-
-        if netloc == "github.com":
-            if len(path_parts) >= 2 and all(path_parts[:2]):
-                return True
-            return False
-
-        elif netloc == "www.farming-simulator.com" or netloc == "farming-simulator.com":
-            if parsed.path == "/mod.php":
-                params = parse_qs(parsed.query)
-                if "mod_id" in params:
-                    return True
-            return False
-
-        else:
-            return False
-    except Exception:
-        return False
-
-
 class GitHubTrackerApp(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("GitHub Release Tracker")
+        self.setWindowTitle("GitHub и Farming Simulator Tracker")
         self.resize(1000, 550)
 
         self.data_file = "repositories.json"
@@ -136,7 +143,7 @@ class GitHubTrackerApp(QWidget):
 
         self.setup_ui()
         self.update_table()
-        self.update_releases()  # Автоматическое обновление при старте
+        self.update_releases()  # Автообновление при старте
 
     def setup_ui(self):
         main_layout = QVBoxLayout(self)
@@ -144,7 +151,7 @@ class GitHubTrackerApp(QWidget):
         # Верхняя панель: поле ввода + кнопки Добавить и Удалить
         top_layout = QHBoxLayout()
         self.url_input = QLineEdit()
-        self.url_input.setPlaceholderText("Введите ссылку на GitHub репозиторий")
+        self.url_input.setPlaceholderText("Введите ссылку на GitHub или Farming Simulator мод")
         top_layout.addWidget(self.url_input)
 
         self.btn_add = QPushButton("Добавить")
@@ -213,29 +220,28 @@ class GitHubTrackerApp(QWidget):
         self.tracked_repos["_column_widths"] = self.column_widths
         self.save_data()
 
-
     def add_repo_from_input(self):
         url = self.url_input.text().strip()
         if not url:
-            self.status_label.setText("Введите ссылку на репозиторий")
+            self.status_label.setText("Введите ссылку на репозиторий или мод")
             return
         if not validate_repo_url(url):
-            self.status_label.setText("Некорректный URL репозитория")
+            self.status_label.setText("Некорректный URL репозитория или мода")
             return
         if url in self.tracked_repos:
-            self.status_label.setText("Репозиторий уже отслеживается")
+            self.status_label.setText("Репозиторий или мод уже отслеживается")
             return
 
         self.tracked_repos[url] = {"last_release": None, "previous_release": None}
         self.save_data()
         self.update_table()
         self.url_input.clear()
-        self.status_label.setText("Репозиторий добавлен")
+        self.status_label.setText("Репозиторий или мод добавлен")
 
     def delete_selected(self):
         selected_rows = set(idx.row() for idx in self.table.selectedIndexes())
         if not selected_rows:
-            self.status_label.setText("Выберите репозиторий для удаления")
+            self.status_label.setText("Выберите репозиторий или мод для удаления")
             return
 
         urls_to_delete = []
@@ -243,15 +249,22 @@ class GitHubTrackerApp(QWidget):
             repo_name = self.table.item(row, 0).text()
             for url in self.tracked_repos:
                 owner, repo = self.get_owner_repo(url)
-                if repo == repo_name:
-                    urls_to_delete.append(url)
-                    break
+                # Для farming-simulator.com repo - это название мода, для github - имя репозитория
+                if "farming-simulator.com" in url:
+                    name = self.tracked_repos[url].get("last_release", {}).get("name", "")
+                    if name == repo_name:
+                        urls_to_delete.append(url)
+                        break
+                else:
+                    if repo == repo_name:
+                        urls_to_delete.append(url)
+                        break
 
         for url in urls_to_delete:
             self.tracked_repos.pop(url, None)
         self.save_data()
         self.update_table()
-        self.status_label.setText("Выбранные репозитории удалены")
+        self.status_label.setText("Выбранные репозитории или моды удалены")
 
     def update_releases(self):
         updated = False
@@ -281,14 +294,14 @@ class GitHubTrackerApp(QWidget):
                                 "date": latest.get("published_at", ""),
                                 "asset_url": asset_url,
                                 "asset_name": asset_name,
-                                "is_new": True
+                                "is_new": True,
+                                "name": repo
                             }
                             updated = True
                         else:
                             self.tracked_repos[url]["last_release"]["is_new"] = False
                     else:
                         self.status_label.setText(f"Ошибка получения релизов для {owner}/{repo}")
-                    pass
                 elif "farming-simulator.com" in url:
                     mod_info = parse_farming_simulator_mod(url)
                     current = self.tracked_repos[url].get("last_release") or {}
@@ -302,7 +315,8 @@ class GitHubTrackerApp(QWidget):
                             "date": mod_info["date"],
                             "asset_url": asset_url,
                             "asset_name": asset_name,
-                            "is_new": True
+                            "is_new": True,
+                            "name": mod_info["name"]
                         }
                         updated = True
                     else:
@@ -315,20 +329,28 @@ class GitHubTrackerApp(QWidget):
         if updated:
             self.status_label.setText("Найдены новые версии!")
         else:
-            self.status_label.setText("Все репозитории актуальны.")
+            self.status_label.setText("Все репозитории и моды актуальны.")
 
     def format_release_date(self, date_str):
         if not date_str:
             return "N/A"
         try:
-            # Парсим дату из ISO формата
-            dt = datetime.strptime(date_str, "%Y-%m-%dT%H:%M:%SZ")
+            dt = None
+            # Попытка распарсить дату в разных форматах
+            for fmt in ("%Y-%m-%dT%H:%M:%SZ", "%d.%m.%Y"):
+                try:
+                    dt = datetime.strptime(date_str, fmt)
+                    break
+                except:
+                    pass
+            if dt is None:
+                return date_str
+
             dt = dt.replace(tzinfo=timezone.utc)
             now = datetime.now(timezone.utc)
             delta = now - dt
             days_ago = delta.days
 
-            # Формат даты: "25 Мая"
             months = [
                 "Января", "Февраля", "Марта", "Апреля", "Мая", "Июня",
                 "Июля", "Августа", "Сентября", "Октября", "Ноября", "Декабря"
@@ -337,7 +359,6 @@ class GitHubTrackerApp(QWidget):
             month_name = months[dt.month - 1]
             date_formatted = f"{day} {month_name}"
 
-            # Сколько дней назад с правильным окончанием
             if days_ago == 0:
                 days_text = "Сегодня"
             elif days_ago == 1:
@@ -347,7 +368,6 @@ class GitHubTrackerApp(QWidget):
             else:
                 days_text = f"{days_ago} дней назад"
 
-            # Возвращаем с переносом и меньшим шрифтом для дней назад
             return f"{date_formatted}\n<span style='font-size:small; color:gray;'>({days_text})</span>"
         except Exception:
             return date_str
@@ -357,36 +377,25 @@ class GitHubTrackerApp(QWidget):
         for url, data in self.tracked_repos.items():
             if url == "_column_widths":
                 continue
-            owner, repo = self.get_owner_repo(url)
             release = data.get("last_release") or {}
             prev_release = data.get("previous_release") or {}
 
             row = self.table.rowCount()
             self.table.insertRow(row)
 
-            # Имя репозитория
-            self.table.setItem(row, 0, QTableWidgetItem(repo))
+            # Имя репозитория или мода
+            name = release.get("name", "N/A")
+            self.table.setItem(row, 0, QTableWidgetItem(name))
             self.table.setItem(row, 1, QTableWidgetItem(release.get("version", "N/A")))
 
-            # Форматируем дату релиза с доп. строкой
+            # Дата релиза с форматированием
             date_html = self.format_release_date(release.get("date", ""))
-            date_item = QTableWidgetItem()
-            date_item.setData(Qt.DisplayRole, "")  # чтобы не показывалось в обычном виде
-            date_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-            date_item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-            date_item.setData(Qt.EditRole, release.get("date", ""))
-            date_item.setToolTip(release.get("date", ""))
-            date_item.setText(date_html)
-            # Устанавливаем html через setData с ролью Qt.DisplayRole не работает,
-            # поэтому используем setItem с обычным текстом и отключаем редактирование.
-            # Чтобы отобразить html, используем setItemWidget с QLabel:
             label = QLabel()
             label.setTextFormat(Qt.RichText)
             label.setText(date_html)
             label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
             self.table.setCellWidget(row, 2, label)
 
-            # Предыдущая версия и дата (обычный текст)
             self.table.setItem(row, 3, QTableWidgetItem(prev_release.get("version", "N/A")))
             self.table.setItem(row, 4, QTableWidgetItem((prev_release.get("date") or "N/A")[:10]))
 
@@ -425,7 +434,7 @@ class GitHubTrackerApp(QWidget):
     def download_release(self, url):
         release = self.tracked_repos[url].get("last_release")
         if not release or not release.get("asset_url"):
-            self.status_label.setText("Нет zip-файла релиза для скачивания.")
+            self.status_label.setText("Нет zip-файла для скачивания.")
             return
 
         asset_url = release["asset_url"]
